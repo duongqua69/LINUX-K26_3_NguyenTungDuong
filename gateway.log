@@ -1,0 +1,169 @@
+1 2026-10-13 17:17:53 MAIN Gateway started (TCP base port 1234, HTTP port 8080)
+2 2026-10-13 17:17:53 CONN Connection manager thread started
+3 2026-10-13 17:17:53 DATA Data manager thread started
+4 2026-10-13 17:17:53 STOR Storage manager thread started
+5 2026-10-13 17:17:53 STOR Connection to SQL server established.
+6 2026-10-13 17:17:54 CONN A sensor node with 30 has opened a new connection
+7 2026-10-13 17:17:54 CONN A sensor node with 21 has opened a new connection
+8 2026-10-13 17:17:54 DATA The sensor node with 30 detected motion
+9 2026-10-13 17:17:54 CONN A sensor node with 40 has opened a new connection
+10 2026-10-13 17:17:54 DATA The sensor node with 40 reports the door is closed
+11 2026-10-13 17:17:54 CONN A sensor node with 50 has opened a new connection
+12 2026-10-13 17:17:54 DATA The sensor node with 50 reports a smoke/gas alarm (concentration = 350.0 ppm)
+13 2026-10-13 17:17:54 CONN A sensor node with 11 has opened a new connection
+14 2026-10-13 17:17:54 CONN A sensor node with 10 has opened a new connection
+15 2026-10-13 17:17:54 DATA The sensor node with 30 detected motion
+16 2026-10-13 17:17:54 DATA The sensor node with 40 reports the door is open
+17 2026-10-13 17:17:55 DATA The sensor node with 30 detected motion
+18 2026-10-13 17:17:55 DATA The sensor node with 21 reports it's too dry (running avg humidity = 20.0)
+19 2026-10-13 17:17:55 DATA The sensor node with 40 reports the door is closed
+20 2026-10-13 17:17:55 DATA The sensor node with 30 detected motion
+21 2026-10-13 17:17:55 DATA The sensor node with 40 reports the door is open
+22 2026-10-13 17:17:56 DATA The sensor node with 30 detected motion
+23 2026-10-13 17:17:56 DATA The sensor node with 40 reports the door is closed
+24 2026-10-13 17:17:56 DATA The sensor node with 10 reports it's too hot (running avg temperature = 24.0)
+25 2026-10-13 17:17:56 DATA The sensor node with 30 detected motion
+26 2026-10-13 17:17:56 DATA The sensor node with 40 reports the door is open
+27 2026-10-13 17:17:57 DATA The sensor node with 30 detected motion
+28 2026-10-13 17:17:57 DATA The sensor node with 40 reports the door is closed
+29 2026-10-13 17:17:57 DATA The sensor node with 30 detected motion
+30 2026-10-13 17:17:57 DATA The sensor node with 40 reports the door is open
+31 2026-10-13 17:17:58 DATA The sensor node with 30 detected motion
+32 2026-10-13 17:17:58 DATA The sensor node with 40 reports the door is closed
+33 2026-10-13 17:17:58 DATA The sensor node with 30 detected motion
+34 2026-10-13 17:17:58 DATA The sensor node with 40 reports the door is open
+35 2026-10-13 17:17:59 DATA The sensor node with 30 detected motion
+36 2026-10-13 17:17:59 DATA The sensor node with 40 reports the door is closed
+37 2026-10-13 17:17:59 DATA The sensor node with 40 reports the door is open
+38 2026-10-13 17:17:59 DATA The sensor node with 30 detected motion
+39 2026-10-13 17:18:00 DATA The sensor node with 40 reports the door is closed
+40 2026-10-13 17:18:00 DATA The sensor node with 30 detected motion
+41 2026-10-13 17:18:00 DATA The sensor node with 40 reports the door is open
+42 2026-10-13 17:18:00 DATA The sensor node with 30 detected motion
+43 2026-10-13 17:18:01 DATA The sensor node with 40 reports the door is closed
+44 2026-10-13 17:18:01 DATA The sensor node with 30 detected motion
+45 2026-10-13 17:18:01 DATA The sensor node with 40 reports the door is open
+46 2026-10-13 17:18:01 DATA The sensor node with 30 detected motion
+47 2026-10-13 17:18:02 DATA The sensor node with 40 reports the door is closed
+48 2026-10-13 17:18:02 DATA The sensor node with 30 detected motion
+49 2026-10-13 17:18:02 DATA The sensor node with 40 reports the door is open
+50 2026-10-13 17:18:02 DATA The sensor node with 30 detected motion
+51 2026-10-13 17:18:03 DATA The sensor node with 40 reports the door is closed
+52 2026-10-13 17:18:03 DATA The sensor node with 30 detected motion
+53 2026-10-13 17:18:03 DATA The sensor node with 40 reports the door is open
+54 2026-10-13 17:18:03 DATA The sensor node with 30 detected motion
+55 2026-10-13 17:18:04 DATA The sensor node with 40 reports the door is closed
+56 2026-10-13 17:18:04 DATA The sensor node with 30 detected motion
+57 2026-10-13 17:18:04 DATA The sensor node with 40 reports the door is open
+58 2026-10-13 17:18:04 DATA The sensor node with 30 detected motion
+59 2026-10-13 17:18:05 DATA The sensor node with 40 reports the door is closed
+60 2026-10-13 17:18:05 DATA The sensor node with 30 detected motion
+61 2026-10-13 17:18:05 DATA The sensor node with 40 reports the door is open
+62 2026-10-13 17:18:05 DATA The sensor node with 30 detected motion
+63 2026-10-13 17:18:06 DATA The sensor node with 40 reports the door is closed
+64 2026-10-13 17:18:06 DATA The sensor node with 30 detected motion
+65 2026-10-13 17:18:06 DATA The sensor node with 40 reports the door is open
+66 2026-10-13 17:18:06 DATA The sensor node with 30 detected motion
+67 2026-10-13 17:18:07 DATA The sensor node with 40 reports the door is closed
+68 2026-10-13 17:18:07 DATA The sensor node with 30 detected motion
+69 2026-10-13 17:18:07 DATA The sensor node with 40 reports the door is open
+70 2026-10-13 17:18:07 DATA The sensor node with 30 detected motion
+71 2026-10-13 17:18:08 DATA The sensor node with 40 reports the door is closed
+72 2026-10-13 17:18:08 DATA The sensor node with 30 detected motion
+73 2026-10-13 17:18:08 DATA The sensor node with 40 reports the door is open
+74 2026-10-13 17:18:08 DATA The sensor node with 30 detected motion
+75 2026-10-13 17:18:09 DATA The sensor node with 40 reports the door is closed
+76 2026-10-13 17:18:09 DATA The sensor node with 30 detected motion
+77 2026-10-13 17:18:09 DATA The sensor node with 40 reports the door is open
+78 2026-10-13 17:18:09 DATA The sensor node with 30 detected motion
+79 2026-10-13 17:18:10 DATA The sensor node with 40 reports the door is closed
+80 2026-10-13 17:18:10 DATA The sensor node with 30 detected motion
+81 2026-10-13 17:18:10 DATA The sensor node with 40 reports the door is open
+82 2026-10-13 17:18:10 DATA The sensor node with 30 detected motion
+83 2026-10-13 17:18:11 DATA The sensor node with 40 reports the door is closed
+84 2026-10-13 17:18:11 DATA The sensor node with 30 detected motion
+85 2026-10-13 17:18:11 DATA The sensor node with 40 reports the door is open
+86 2026-10-13 17:18:11 DATA The sensor node with 30 detected motion
+87 2026-10-13 17:18:12 DATA The sensor node with 40 reports the door is closed
+88 2026-10-13 17:18:12 DATA The sensor node with 30 detected motion
+89 2026-10-13 17:18:12 DATA The sensor node with 40 reports the door is open
+90 2026-10-13 17:18:12 DATA The sensor node with 30 detected motion
+91 2026-10-13 17:18:13 DATA The sensor node with 40 reports the door is closed
+92 2026-10-13 17:18:13 DATA The sensor node with 30 detected motion
+93 2026-10-13 17:18:13 DATA The sensor node with 40 reports the door is open
+94 2026-10-13 17:18:13 DATA The sensor node with 30 detected motion
+95 2026-10-13 17:18:14 DATA The sensor node with 40 reports the door is closed
+96 2026-10-13 17:18:14 DATA The sensor node with 30 detected motion
+97 2026-10-13 17:18:14 DATA The sensor node with 40 reports the door is open
+98 2026-10-13 17:18:14 DATA The sensor node with 30 detected motion
+99 2026-10-13 17:18:15 DATA The sensor node with 40 reports the door is closed
+100 2026-10-13 17:18:15 DATA The sensor node with 30 detected motion
+101 2026-10-13 17:18:15 DATA The sensor node with 40 reports the door is open
+102 2026-10-13 17:18:15 DATA The sensor node with 30 detected motion
+103 2026-10-13 17:18:16 DATA The sensor node with 40 reports the door is closed
+104 2026-10-13 17:18:16 DATA The sensor node with 30 detected motion
+105 2026-10-13 17:18:16 DATA The sensor node with 30 detected motion
+106 2026-10-13 17:18:16 DATA The sensor node with 40 reports the door is open
+107 2026-10-13 17:18:17 DATA The sensor node with 40 reports the door is closed
+108 2026-10-13 17:18:17 DATA The sensor node with 30 detected motion
+109 2026-10-13 17:18:17 DATA The sensor node with 40 reports the door is open
+110 2026-10-13 17:18:17 DATA The sensor node with 30 detected motion
+111 2026-10-13 17:18:18 DATA The sensor node with 40 reports the door is closed
+112 2026-10-13 17:18:18 DATA The sensor node with 30 detected motion
+113 2026-10-13 17:18:18 DATA The sensor node with 40 reports the door is open
+114 2026-10-13 17:18:18 DATA The sensor node with 30 detected motion
+115 2026-10-13 17:18:19 DATA The sensor node with 40 reports the door is closed
+116 2026-10-13 17:18:19 DATA The sensor node with 30 detected motion
+117 2026-10-13 17:18:19 DATA The sensor node with 40 reports the door is open
+118 2026-10-13 17:18:19 DATA The sensor node with 30 detected motion
+119 2026-10-13 17:18:20 DATA The sensor node with 40 reports the door is closed
+120 2026-10-13 17:18:20 DATA The sensor node with 30 detected motion
+121 2026-10-13 17:18:20 DATA The sensor node with 40 reports the door is open
+122 2026-10-13 17:18:20 DATA The sensor node with 30 detected motion
+123 2026-10-13 17:18:21 DATA The sensor node with 30 detected motion
+124 2026-10-13 17:18:21 DATA The sensor node with 40 reports the door is closed
+125 2026-10-13 17:18:21 DATA The sensor node with 30 detected motion
+126 2026-10-13 17:18:21 DATA The sensor node with 40 reports the door is open
+127 2026-10-13 17:18:22 DATA The sensor node with 40 reports the door is closed
+128 2026-10-13 17:18:22 DATA The sensor node with 30 detected motion
+129 2026-10-13 17:18:22 DATA The sensor node with 40 reports the door is open
+130 2026-10-13 17:18:22 DATA The sensor node with 30 detected motion
+131 2026-10-13 17:18:23 DATA The sensor node with 40 reports the door is closed
+132 2026-10-13 17:18:23 DATA The sensor node with 30 detected motion
+133 2026-10-13 17:18:23 DATA The sensor node with 30 detected motion
+134 2026-10-13 17:18:23 DATA The sensor node with 40 reports the door is open
+135 2026-10-13 17:18:24 DATA The sensor node with 40 reports the door is closed
+136 2026-10-13 17:18:24 DATA The sensor node with 30 detected motion
+137 2026-10-13 17:18:24 DATA The sensor node with 30 detected motion
+138 2026-10-13 17:18:24 DATA The sensor node with 40 reports the door is open
+139 2026-10-13 17:18:25 DATA The sensor node with 30 detected motion
+140 2026-10-13 17:18:25 DATA The sensor node with 40 reports the door is closed
+141 2026-10-13 17:18:25 DATA The sensor node with 30 detected motion
+142 2026-10-13 17:18:25 DATA The sensor node with 40 reports the door is open
+143 2026-10-13 17:18:26 DATA The sensor node with 30 detected motion
+144 2026-10-13 17:18:26 DATA The sensor node with 40 reports the door is closed
+145 2026-10-13 17:18:26 DATA The sensor node with 30 detected motion
+146 2026-10-13 17:18:26 DATA The sensor node with 40 reports the door is open
+147 2026-10-13 17:18:27 DATA The sensor node with 30 detected motion
+148 2026-10-13 17:18:27 DATA The sensor node with 40 reports the door is closed
+149 2026-10-13 17:18:27 DATA The sensor node with 30 detected motion
+150 2026-10-13 17:18:27 DATA The sensor node with 40 reports the door is open
+151 2026-10-13 17:18:28 DATA The sensor node with 30 detected motion
+152 2026-10-13 17:18:28 DATA The sensor node with 40 reports the door is closed
+153 2026-10-13 17:18:28 DATA The sensor node with 30 detected motion
+154 2026-10-13 17:18:28 DATA The sensor node with 40 reports the door is open
+155 2026-10-13 17:18:29 DATA The sensor node with 30 detected motion
+156 2026-10-13 17:18:29 DATA The sensor node with 40 reports the door is closed
+157 2026-10-13 17:18:29 DATA The sensor node with 30 detected motion
+158 2026-10-13 17:18:29 DATA The sensor node with 40 reports the door is open
+159 2026-10-13 17:18:30 DATA The sensor node with 30 detected motion
+160 2026-10-13 17:18:30 DATA The sensor node with 40 reports the door is closed
+161 2026-10-13 17:18:30 DATA The sensor node with 40 reports the door is open
+162 2026-10-13 17:18:30 DATA The sensor node with 30 detected motion
+163 2026-10-13 17:18:30 CONN The sensor node with 10 has closed the connection
+164 2026-10-13 17:18:30 CONN The sensor node with 21 has closed the connection
+165 2026-10-13 17:18:30 CONN The sensor node with 11 has closed the connection
+166 2026-10-13 17:18:30 CONN The sensor node with 50 has closed the connection
+167 2026-10-13 17:18:30 CONN The sensor node with 40 has closed the connection
+168 2026-10-13 17:18:30 CONN The sensor node with 30 has closed the connection
+169 2026-10-13 17:18:30 MAIN Gateway shutting down (signal received)
