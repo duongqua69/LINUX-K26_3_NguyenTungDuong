@@ -1,0 +1,6 @@
+# room sensor_id type
+501 1 temperature
+501 2 humidity
+602 3 motion
+703 4 door
+804 5 smoke_gas

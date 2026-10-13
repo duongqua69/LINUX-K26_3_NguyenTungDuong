@@ -4,20 +4,20 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
-#include <inttypes.h>
-#include <math.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 #include "logger.h"
+#include "protocol_adapter.h"
 
-#define TBP_FRAME_SIZE 18
+#define ADAPTER_COUNT 4
+#define RX_BUF_SIZE 512
+#define MAX_CONSECUTIVE_PARSE_ERRORS 3
 
 #ifdef DEBUG
 #define DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
@@ -27,10 +27,15 @@
 
 typedef struct {
     int fd;
-    uint8_t rx[TBP_FRAME_SIZE];
+    const protocol_adapter_t *adapter;
+    uint8_t rx[RX_BUF_SIZE];
     size_t rx_len;
+    unsigned int consecutive_errors;
     int identified;
     sensor_id_t sensor_id;
+    int has_last_sgp_frame;
+    sensor_id_t last_sgp_id;
+    time_t last_sgp_ts;
 } connection_t;
 
 static int stop_requested(gateway_t *gateway)
@@ -43,12 +48,47 @@ static int stop_requested(gateway_t *gateway)
     return stopped;
 }
 
-static void log_connection(gateway_t *gateway, const char *event,
-                           sensor_id_t sensor_id)
+static int send_all(int fd, const uint8_t *buffer, size_t length)
 {
-    char message[128];
+    size_t offset = 0;
+
+    while (offset < length) {
+        ssize_t sent = send(fd, buffer + offset, length - offset, 0);
+        if (sent < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (sent == 0) {
+            errno = EPIPE;
+            return -1;
+        }
+        offset += (size_t)sent;
+    }
+    return 0;
+}
+
+static void log_sensor_event(gateway_t *gateway, const char *event,
+                             sensor_id_t sensor_id)
+{
+    char message[160];
 
     (void)snprintf(message, sizeof(message), event, (unsigned int)sensor_id);
+    if (logger_write(gateway, "CONN", message) != 0) {
+        perror("logger_write");
+    }
+}
+
+static void log_malformed_frame(gateway_t *gateway,
+                                const protocol_adapter_t *adapter,
+                                const char *reason)
+{
+    char message[160];
+
+    (void)snprintf(message, sizeof(message),
+                   "Received malformed frame on %s port (%s)",
+                   adapter->name, reason);
     if (logger_write(gateway, "CONN", message) != 0) {
         perror("logger_write");
     }
@@ -57,52 +97,11 @@ static void log_connection(gateway_t *gateway, const char *event,
 static void close_connection(gateway_t *gateway, connection_t *connection)
 {
     if (connection->identified) {
-        log_connection(gateway,
-                       "The sensor node with %u has closed the connection",
-                       connection->sensor_id);
+        log_sensor_event(gateway,
+                         "The sensor node with %u has closed the connection",
+                         connection->sensor_id);
     }
     (void)close(connection->fd);
-    connection->fd = -1;
-    connection->rx_len = 0;
-}
-
-static uint64_t decode_little_endian(const uint8_t *bytes, size_t length)
-{
-    uint64_t value = 0;
-    size_t i;
-
-    for (i = 0; i < length; ++i) {
-        value |= (uint64_t)bytes[i] << (8U * i);
-    }
-    return value;
-}
-
-static int process_frame(gateway_t *gateway, connection_t *connection)
-{
-    uint64_t value_bits = decode_little_endian(&connection->rx[2], 8);
-    uint64_t timestamp_bits = decode_little_endian(&connection->rx[10], 8);
-    sensor_data_t data = { 0 };
-    int64_t timestamp;
-
-    data.id = (sensor_id_t)decode_little_endian(connection->rx, 2);
-    memcpy(&data.value, &value_bits, sizeof(data.value));
-    memcpy(&timestamp, &timestamp_bits, sizeof(timestamp));
-    if (data.id == 0 || !isfinite(data.value) || timestamp < 0) {
-        return -1;
-    }
-    data.type = SENSOR_TEMPERATURE;
-    data.ts = (time_t)timestamp;
-    if (sbuffer_insert(&gateway->sbuffer, &data) != 0) {
-        return -1;
-    }
-    if (!connection->identified) {
-        connection->identified = 1;
-        connection->sensor_id = data.id;
-        log_connection(gateway,
-                       "A sensor node with %u has opened a new connection",
-                       data.id);
-    }
-    return 0;
 }
 
 static int create_listener(uint16_t port)
@@ -128,99 +127,213 @@ static int create_listener(uint16_t port)
     return fd;
 }
 
-static void log_attempt_failure(gateway_t *gateway, const char *reason)
+static void log_listener_failure(gateway_t *gateway,
+                                 const protocol_adapter_t *adapter,
+                                 const char *reason)
 {
     char message[160];
 
     (void)snprintf(message, sizeof(message),
-                   "Connection attempt failed on TBP port (%s)", reason);
+                   "Connection attempt failed on %s port (%s)",
+                   adapter->name, reason);
     if (logger_write(gateway, "CONN", message) != 0) {
         perror("logger_write");
     }
 }
 
+static int append_connection(connection_t **connections, size_t *count,
+                             int fd, const protocol_adapter_t *adapter)
+{
+    connection_t *grown = realloc(*connections,
+                                  (*count + 1) * sizeof(**connections));
+    if (grown == NULL) {
+        return -1;
+    }
+    *connections = grown;
+    (*connections)[*count] = (connection_t){
+        .fd = fd,
+        .adapter = adapter
+    };
+    ++(*count);
+    return 0;
+}
+
+static int send_adapter_reply(connection_t *connection,
+                              parse_result_t result)
+{
+    uint8_t reply[8];
+    size_t reply_len = connection->adapter->build_reply(
+        result, reply, sizeof(reply));
+
+    if (reply_len == 0) {
+        return 0;
+    }
+    return send_all(connection->fd, reply, reply_len);
+}
+
+static int process_buffer(gateway_t *gateway, connection_t *connection)
+{
+    while (connection->rx_len > 0) {
+        sensor_data_t data = { 0 };
+        size_t consumed = 0;
+        parse_result_t result = connection->adapter->parse(
+            connection->rx, connection->rx_len, &data, &consumed);
+
+        if (result == PARSE_NEED_MORE) {
+            return connection->rx_len == sizeof(connection->rx) ? -1 : 0;
+        }
+        if (consumed == 0 || consumed > connection->rx_len) {
+            log_malformed_frame(gateway, connection->adapter,
+                                "parser returned invalid consumed length");
+            return -1;
+        }
+        if (result == PARSE_ERROR) {
+            log_malformed_frame(gateway, connection->adapter, "invalid frame");
+            ++connection->consecutive_errors;
+            if (send_adapter_reply(connection, PARSE_ERROR) != 0) {
+                return -1;
+            }
+            memmove(connection->rx, connection->rx + consumed,
+                    connection->rx_len - consumed);
+            connection->rx_len -= consumed;
+            if (connection->consecutive_errors >= MAX_CONSECUTIVE_PARSE_ERRORS) {
+                log_malformed_frame(gateway, connection->adapter,
+                                    "three consecutive errors; closing connection");
+                return -1;
+            }
+            continue;
+        }
+        if (result != PARSE_OK) {
+            log_malformed_frame(gateway, connection->adapter,
+                                "parser returned unknown result");
+            return -1;
+        }
+
+        connection->consecutive_errors = 0;
+        if (!connection->identified) {
+            connection->identified = 1;
+            connection->sensor_id = data.id;
+            log_sensor_event(gateway,
+                             "A sensor node with %u has opened a new connection",
+                             data.id);
+        }
+
+        /* SGP retries may repeat an acknowledged measurement after a lost ACK. */
+        if (connection->adapter->port_offset == 3 &&
+            connection->has_last_sgp_frame &&
+            connection->last_sgp_id == data.id &&
+            connection->last_sgp_ts == data.ts) {
+            DEBUG_PRINT("Ignoring duplicate SGP frame: sensor_id=%u ts=%lld\n",
+                        (unsigned int)data.id, (long long)data.ts);
+        } else if (sbuffer_insert(&gateway->sbuffer, &data) != 0) {
+            return -1;
+        }
+        if (connection->adapter->port_offset == 3) {
+            connection->has_last_sgp_frame = 1;
+            connection->last_sgp_id = data.id;
+            connection->last_sgp_ts = data.ts;
+        }
+        if (send_adapter_reply(connection, PARSE_OK) != 0) {
+            return -1;
+        }
+
+        memmove(connection->rx, connection->rx + consumed,
+                connection->rx_len - consumed);
+        connection->rx_len -= consumed;
+    }
+    return 0;
+}
+
 void *connection_manager_thread(void *argument)
 {
     gateway_t *gateway = argument;
+    int listeners[ADAPTER_COUNT] = { -1, -1, -1, -1 };
     connection_t *connections = NULL;
     size_t count = 0;
-    int listener = create_listener(gateway->base_port);
+    size_t i;
 
     if (logger_write(gateway, "CONN", "Connection manager thread started") != 0) {
         perror("logger_write");
     }
-
-    if (listener < 0) {
-        log_attempt_failure(gateway, strerror(errno));
-        return NULL;
+    for (i = 0; i < ADAPTER_COUNT; ++i) {
+        uint16_t port = (uint16_t)(gateway->base_port +
+                                   protocol_adapters[i].port_offset);
+        listeners[i] = create_listener(port);
+        if (listeners[i] < 0) {
+            log_listener_failure(gateway, &protocol_adapters[i], strerror(errno));
+            while (i > 0) {
+                (void)close(listeners[--i]);
+            }
+            return NULL;
+        }
     }
+
     while (!stop_requested(gateway)) {
         size_t polled_count = count;
-        struct pollfd *pollfds = calloc(polled_count + 1, sizeof(*pollfds));
-        size_t i;
+        struct pollfd *pollfds = calloc(ADAPTER_COUNT + polled_count,
+                                       sizeof(*pollfds));
         int ready;
 
         if (pollfds == NULL) {
-            log_attempt_failure(gateway, "out of memory");
+            log_listener_failure(gateway, &protocol_adapters[0], "out of memory");
             break;
         }
-        pollfds[0].fd = listener;
-        pollfds[0].events = POLLIN;
+        for (i = 0; i < ADAPTER_COUNT; ++i) {
+            pollfds[i].fd = listeners[i];
+            pollfds[i].events = POLLIN;
+        }
         for (i = 0; i < polled_count; ++i) {
-            pollfds[i + 1].fd = connections[i].fd;
-            pollfds[i + 1].events = POLLIN;
+            pollfds[ADAPTER_COUNT + i].fd = connections[i].fd;
+            pollfds[ADAPTER_COUNT + i].events = POLLIN;
         }
-        ready = poll(pollfds, polled_count + 1, 200);
+        ready = poll(pollfds, ADAPTER_COUNT + polled_count, 200);
         if (ready < 0 && errno != EINTR) {
+            log_listener_failure(gateway, &protocol_adapters[0], strerror(errno));
             free(pollfds);
-            log_attempt_failure(gateway, strerror(errno));
             break;
         }
-        if (ready > 0 && (pollfds[0].revents & POLLIN) != 0) {
-            for (;;) {
-                int client = accept(listener, NULL, NULL);
-                connection_t *grown;
-                if (client < 0) {
-                    if (errno == EINTR) {
-                        continue;
+
+        for (i = 0; i < ADAPTER_COUNT && ready > 0; ++i) {
+            if ((pollfds[i].revents & POLLIN) != 0) {
+                int client = accept(listeners[i], NULL, NULL);
+                if (client >= 0) {
+                    if (append_connection(&connections, &count, client,
+                                          &protocol_adapters[i]) != 0) {
+                        log_listener_failure(gateway, &protocol_adapters[i],
+                                             "out of memory");
+                        (void)close(client);
                     }
-                    if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                        log_attempt_failure(gateway, strerror(errno));
-                    }
-                    break;
+                } else if (errno != EINTR && errno != EAGAIN &&
+                           errno != EWOULDBLOCK) {
+                    log_listener_failure(gateway, &protocol_adapters[i],
+                                         strerror(errno));
                 }
-                grown = realloc(connections, (count + 1) * sizeof(*connections));
-                if (grown == NULL) {
-                    log_attempt_failure(gateway, "out of memory");
-                    (void)close(client);
-                    break;
-                }
-                connections = grown;
-                connections[count++] = (connection_t){ .fd = client };
-                /* Accept one connection per readiness notification. */
-                break;
             }
         }
+
         for (i = polled_count; i > 0; --i) {
             size_t index = i - 1;
-            short events = pollfds[index + 1].revents;
+            short events = pollfds[ADAPTER_COUNT + index].revents;
             connection_t *connection = &connections[index];
             int remove = (events & (POLLERR | POLLNVAL)) != 0;
 
             if (!remove && (events & POLLIN) != 0) {
-                ssize_t received = recv(connection->fd,
-                                        connection->rx + connection->rx_len,
-                                        TBP_FRAME_SIZE - connection->rx_len, 0);
-                if (received <= 0) {
+                ssize_t received;
+                if (connection->rx_len == sizeof(connection->rx) &&
+                    process_buffer(gateway, connection) != 0) {
                     remove = 1;
-                } else {
-                    connection->rx_len += (size_t)received;
-                    if (connection->rx_len == TBP_FRAME_SIZE) {
-                        if (process_frame(gateway, connection) != 0) {
-                            log_attempt_failure(gateway, "invalid TBP frame");
+                }
+                if (!remove) {
+                    received = recv(connection->fd,
+                                    connection->rx + connection->rx_len,
+                                    sizeof(connection->rx) - connection->rx_len,
+                                    0);
+                    if (received <= 0) {
+                        remove = 1;
+                    } else {
+                        connection->rx_len += (size_t)received;
+                        if (process_buffer(gateway, connection) != 0) {
                             remove = 1;
-                        } else {
-                            connection->rx_len = 0;
                         }
                     }
                 }
@@ -239,7 +352,10 @@ void *connection_manager_thread(void *argument)
         }
         free(pollfds);
     }
-    (void)close(listener);
+
+    for (i = 0; i < ADAPTER_COUNT; ++i) {
+        (void)close(listeners[i]);
+    }
     while (count > 0) {
         close_connection(gateway, &connections[--count]);
     }
@@ -247,37 +363,38 @@ void *connection_manager_thread(void *argument)
     return NULL;
 }
 
-static void *reader_thread(gateway_t *gateway, sbuffer_reader_t reader,
-                           const char *label)
+void *data_manager_thread(void *argument)
 {
+    gateway_t *gateway = argument;
     sensor_data_t data;
-    char start_message[96];
-    const char *source = reader == SBUFFER_READER_DATA ? "DATA" : "STOR";
+    uint64_t sequence;
 
-    (void)snprintf(start_message, sizeof(start_message),
-                   "%s thread started", label);
-    if (logger_write(gateway, source, start_message) != 0) {
+    if (logger_write(gateway, "DATA", "Data manager thread started") != 0) {
         perror("logger_write");
     }
-
     for (;;) {
-        int result = sbuffer_read(&gateway->sbuffer, reader, &data);
+        datamgr_event_t event;
+        int result = sbuffer_read(&gateway->sbuffer, SBUFFER_READER_DATA,
+                                  &data, &sequence);
         if (result <= 0) {
             break;
         }
-        DEBUG_PRINT("DEBUG %s: sensor_id=%u type=%d value=%.2f ts=%lld\n",
-                    label, (unsigned int)data.id, (int)data.type, data.value,
-                    (long long)data.ts);
+        if (datamgr_process(&gateway->datamgr, &data, &event) != 0) {
+            perror("datamgr_process");
+            (void)sbuffer_ack(&gateway->sbuffer, SBUFFER_READER_DATA, sequence);
+            continue;
+        }
+        if (event.should_log &&
+            logger_write(gateway, "DATA", event.message) != 0) {
+            perror("logger_write");
+        }
+        DEBUG_PRINT("DEBUG Data manager: sensor_id=%u type=%d value=%.2f "
+                    "room=%u avg=%s%.2f\n",
+                    (unsigned int)data.id, (int)data.type, data.value,
+                    (unsigned int)event.room,
+                    event.has_running_avg ? "" : "n/a ",
+                    event.running_avg);
+        (void)sbuffer_ack(&gateway->sbuffer, SBUFFER_READER_DATA, sequence);
     }
     return NULL;
-}
-
-void *data_manager_thread(void *argument)
-{
-    return reader_thread(argument, SBUFFER_READER_DATA, "Data manager");
-}
-
-void *storage_manager_thread(void *argument)
-{
-    return reader_thread(argument, SBUFFER_READER_STORAGE, "Storage manager");
 }

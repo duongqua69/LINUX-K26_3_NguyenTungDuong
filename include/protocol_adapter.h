@@ -28,4 +28,9 @@ typedef struct {
     size_t (*build_reply)(parse_result_t result, uint8_t *reply, size_t cap);
 } protocol_adapter_t;
 
+/* Adapters are ordered by port offset: TBP, HLP, EVP, and SGP. */
+extern const protocol_adapter_t protocol_adapters[4];
+/* CRC-16/CCITT-FALSE helper, also exposed for protocol-vector tests. */
+uint16_t protocol_crc16_ccitt_false(const uint8_t *buf, size_t len);
+
 #endif /* PROTOCOL_ADAPTER_H */

@@ -15,7 +15,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define LOG_FIFO_PATH "logFifo"
 #define LOG_FILE_PATH "gateway.log"
 #define LOG_MESSAGE_MAX 200
 #define LOG_SOURCE_MAX 4
@@ -40,11 +39,11 @@ static int is_valid_source(const char *source, size_t length)
     return 0;
 }
 
-static int ensure_log_fifo(void)
+static int ensure_log_fifo(const char *fifo_path)
 {
     struct stat status;
 
-    if (lstat(LOG_FIFO_PATH, &status) == 0) {
+    if (lstat(fifo_path, &status) == 0) {
         if (!S_ISFIFO(status.st_mode)) {
             errno = EINVAL;
             return -1;
@@ -56,10 +55,10 @@ static int ensure_log_fifo(void)
     }
 
     /* Create the named pipe if it does not exist; tolerate a concurrent creator. */
-    if (mkfifo(LOG_FIFO_PATH, 0666) != 0 && errno != EEXIST) {
+    if (mkfifo(fifo_path, 0666) != 0 && errno != EEXIST) {
         return -1;
     }
-    if (lstat(LOG_FIFO_PATH, &status) != 0) {
+    if (lstat(fifo_path, &status) != 0) {
         return -1;
     }
     if (!S_ISFIFO(status.st_mode)) {
@@ -138,6 +137,12 @@ static int process_log_line(int log_fd, uint64_t *sequence,
         return 0;
     }
 
+    /* A private FIFO record lets the logger exit even if another writer stays open. */
+    if (source_length == 4 && memcmp(line, "MAIN", 4) == 0 &&
+        strcmp(separator + 1, "__LOGGER_STOP__") == 0) {
+        return 1;
+    }
+
     *separator = '\0';
     ++(*sequence);
     if (write_log_record(log_fd, *sequence, line, separator + 1) != 0) {
@@ -173,11 +178,16 @@ static int log_process_main(int fifo_fd, int log_fd)
         for (i = 0; i < bytes_read; ++i) {
             char byte = input[i];
             if (byte == '\n') {
-                if (!discard_line &&
-                    process_log_line(log_fd, &sequence, line,
-                                     line_length) != 0) {
-                    perror("log process write");
-                    return EXIT_FAILURE;
+                if (!discard_line) {
+                    int result = process_log_line(log_fd, &sequence, line,
+                                                  line_length);
+                    if (result > 0) {
+                        return EXIT_SUCCESS;
+                    }
+                    if (result < 0) {
+                        perror("log process write");
+                        return EXIT_FAILURE;
+                    }
                 }
                 line_length = 0;
                 discard_line = 0;
@@ -199,12 +209,23 @@ int logger_start(gateway_t *gateway)
     int log_fd;
     int fifo_fd;
 
-    if (gateway == NULL || ensure_log_fifo() != 0) {
+    if (gateway == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (snprintf(gateway->log_fifo_path, sizeof(gateway->log_fifo_path),
+                 "logFifo.%ld", (long)getpid()) >=
+        (int)sizeof(gateway->log_fifo_path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if (ensure_log_fifo(gateway->log_fifo_path) != 0) {
         return -1;
     }
 
     /* Open the output before fork so startup failures are reported to the parent. */
-    log_fd = open(LOG_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    log_fd = open(LOG_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC | O_APPEND,
+                  0644);
     if (log_fd < 0) {
         return -1;
     }
@@ -213,6 +234,7 @@ int logger_start(gateway_t *gateway)
     sigemptyset(&ignore_sigpipe.sa_mask);
     if (sigaction(SIGPIPE, &ignore_sigpipe, NULL) != 0) {
         close(log_fd);
+        (void)unlink(gateway->log_fifo_path);
         return -1;
     }
 
@@ -220,10 +242,11 @@ int logger_start(gateway_t *gateway)
     child_pid = fork();
     if (child_pid < 0) {
         close(log_fd);
+        (void)unlink(gateway->log_fifo_path);
         return -1;
     }
     if (child_pid == 0) {
-        int child_fifo_fd = open(LOG_FIFO_PATH, O_RDONLY);
+        int child_fifo_fd = open(gateway->log_fifo_path, O_RDONLY);
         int child_status;
 
         if (child_fifo_fd < 0) {
@@ -239,12 +262,13 @@ int logger_start(gateway_t *gateway)
 
     gateway->log_pid = child_pid;
     /* Opening the write end pairs with the child's blocking read-end open. */
-    fifo_fd = open(LOG_FIFO_PATH, O_WRONLY);
+    fifo_fd = open(gateway->log_fifo_path, O_WRONLY);
     close(log_fd);
     if (fifo_fd < 0) {
         int status;
         (void)waitpid(child_pid, &status, 0);
         gateway->log_pid = -1;
+        (void)unlink(gateway->log_fifo_path);
         return -1;
     }
     gateway->log_fd = fifo_fd;
@@ -313,7 +337,9 @@ int logger_write(gateway_t *gateway, const char *source, const char *message)
 
 int logger_stop(gateway_t *gateway)
 {
+    static const char stop_record[] = "MAIN __LOGGER_STOP__\n";
     int status;
+    int result = 0;
     pid_t waited_pid;
 
     if (gateway == NULL) {
@@ -322,11 +348,22 @@ int logger_stop(gateway_t *gateway)
     }
     /* Closing the last writer gives the log process EOF so it can exit cleanly. */
     if (gateway->log_fd >= 0) {
-        close(gateway->log_fd);
+        ssize_t bytes_written;
+
+        do {
+            bytes_written = write(gateway->log_fd, stop_record,
+                                  sizeof(stop_record) - 1);
+        } while (bytes_written < 0 && errno == EINTR);
+        if (bytes_written != (ssize_t)(sizeof(stop_record) - 1)) {
+            result = -1;
+        }
+        if (close(gateway->log_fd) != 0) {
+            result = -1;
+        }
         gateway->log_fd = -1;
     }
     if (gateway->log_pid <= 0) {
-        return 0;
+        return result;
     }
 
     do {
@@ -334,11 +371,13 @@ int logger_stop(gateway_t *gateway)
     } while (waited_pid < 0 && errno == EINTR);
     gateway->log_pid = -1;
     if (waited_pid < 0) {
+        (void)unlink(gateway->log_fifo_path);
         return -1;
     }
+    (void)unlink(gateway->log_fifo_path);
     if (!WIFEXITED(status) || WEXITSTATUS(status) != EXIT_SUCCESS) {
         errno = ECHILD;
         return -1;
     }
-    return 0;
+    return result;
 }

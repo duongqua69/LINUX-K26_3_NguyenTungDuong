@@ -21,6 +21,8 @@
 
 #define MANAGER_COUNT 3
 #define LOG_MESSAGE_BUFFER_SIZE 200
+#define DEFAULT_ROOM_SENSOR_PATH "room_sensor.map"
+#define DEFAULT_DATABASE_PATH "sensor_data.sqlite"
 
 static gateway_t gateway = {
     .stop_lock = PTHREAD_MUTEX_INITIALIZER,
@@ -83,18 +85,24 @@ int main(int argc, char *argv[])
     sigset_t termination_signals;
     sigset_t previous_mask;
     char log_message[LOG_MESSAGE_BUFFER_SIZE];
+    const char *room_sensor_path = DEFAULT_ROOM_SENSOR_PATH;
+    const char *database_path = DEFAULT_DATABASE_PATH;
     size_t threads_created = 0;
     size_t i;
+    int storage_failed;
     int exit_status = EXIT_SUCCESS;
 
     /* Step 3 accepts a base port alone; preserve the earlier optional HTTP port. */
-    if ((argc != 2 && argc != 3) ||
+    if ((argc < 2 || argc > 5) ||
         parse_port(argv[1], &gateway.base_port) != 0 ||
-        (argc == 3 && parse_port(argv[2], &gateway.http_port) != 0) ||
+        (argc >= 3 && parse_port(argv[2], &gateway.http_port) != 0) ||
         gateway.base_port > UINT16_MAX - 3 ||
-        (argc == 3 && gateway.http_port >= gateway.base_port &&
+        (argc >= 3 && gateway.http_port >= gateway.base_port &&
          gateway.http_port <= gateway.base_port + 3)) {
-        fprintf(stderr, "Usage: %s <base-port> [http-port]\n", argv[0]);
+        fprintf(stderr,
+                "Usage: %s <base-port> [http-port [room-sensor-file "
+                "[database-file]]]\n",
+                argv[0]);
         fprintf(stderr,
                 "Ports must be in 1..65535; base-port through base-port+3 "
                 "must be in range.\n");
@@ -103,8 +111,26 @@ int main(int argc, char *argv[])
     if (argc == 2) {
         gateway.http_port = 8080;
     }
+    if (argc == 4) {
+        room_sensor_path = argv[3];
+    }
+    if (argc == 5) {
+        room_sensor_path = argv[3];
+        database_path = argv[4];
+    }
+    if (snprintf(gateway.database_path, sizeof(gateway.database_path), "%s",
+                 database_path) >= (int)sizeof(gateway.database_path)) {
+        fprintf(stderr, "Database path is too long\n");
+        return EXIT_FAILURE;
+    }
     if (sbuffer_init(&gateway.sbuffer) != 0) {
         perror("sbuffer_init");
+        return EXIT_FAILURE;
+    }
+    if (datamgr_load(&gateway.datamgr, room_sensor_path) != 0) {
+        fprintf(stderr, "Could not load room-sensor file '%s': %s\n",
+                room_sensor_path, strerror(errno));
+        sbuffer_destroy(&gateway.sbuffer);
         return EXIT_FAILURE;
     }
 
@@ -186,10 +212,17 @@ int main(int argc, char *argv[])
         }
     }
 
+    (void)pthread_mutex_lock(&gateway.stop_lock);
+    storage_failed = gateway.storage_failed;
+    (void)pthread_mutex_unlock(&gateway.stop_lock);
     (void)snprintf(log_message, sizeof(log_message),
                    "Gateway shutting down (%s)",
-                   threads_created == MANAGER_COUNT ? "signal received" :
-                                                      "thread creation failure");
+                   threads_created != MANAGER_COUNT ? "thread creation failure" :
+                   storage_failed ? "database retry limit reached" :
+                                    "signal received");
+    if (storage_failed) {
+        exit_status = EXIT_FAILURE;
+    }
     if (logger_write(&gateway, "MAIN", log_message) != 0) {
         perror("logger_write");
         exit_status = EXIT_FAILURE;

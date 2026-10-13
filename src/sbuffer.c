@@ -48,6 +48,7 @@ int sbuffer_insert(sbuffer_t *buffer, const sensor_data_t *data)
         errno = ESHUTDOWN;
         return -1;
     }
+    node->sequence = ++buffer->next_sequence;
     if (buffer->tail == NULL) {
         buffer->head = node;
     } else {
@@ -61,12 +62,12 @@ int sbuffer_insert(sbuffer_t *buffer, const sensor_data_t *data)
 }
 
 int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
-                 sensor_data_t *data)
+                 sensor_data_t *data, uint64_t *sequence)
 {
     sbuffer_node_t *node;
     bool *read_flag;
 
-    if (buffer == NULL || data == NULL ||
+    if (buffer == NULL || data == NULL || sequence == NULL ||
         (reader != SBUFFER_READER_DATA && reader != SBUFFER_READER_STORAGE)) {
         errno = EINVAL;
         return -1;
@@ -76,19 +77,12 @@ int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
         for (node = buffer->head; node != NULL; node = node->next) {
             read_flag = reader == SBUFFER_READER_DATA ? &node->read_by_data :
                                                        &node->read_by_storage;
-            if (!*read_flag) {
+            bool *pending_flag = reader == SBUFFER_READER_DATA ?
+                                     &node->pending_data : &node->pending_storage;
+            if (!*read_flag && !*pending_flag) {
                 *data = node->data;
-                *read_flag = true;
-                while (buffer->head != NULL && buffer->head->read_by_data &&
-                       buffer->head->read_by_storage) {
-                    sbuffer_node_t *consumed = buffer->head;
-                    buffer->head = consumed->next;
-                    if (buffer->head == NULL) {
-                        buffer->tail = NULL;
-                    }
-                    --buffer->size;
-                    free(consumed);
-                }
+                *sequence = node->sequence;
+                *pending_flag = true;
                 (void)pthread_mutex_unlock(&buffer->lock);
                 return 1;
             }
@@ -99,6 +93,52 @@ int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
         }
         (void)pthread_cond_wait(&buffer->not_empty, &buffer->lock);
     }
+}
+
+int sbuffer_ack(sbuffer_t *buffer, sbuffer_reader_t reader, uint64_t sequence)
+{
+    sbuffer_node_t *node;
+    bool *read_flag;
+
+    if (buffer == NULL || sequence == 0 ||
+        (reader != SBUFFER_READER_DATA && reader != SBUFFER_READER_STORAGE)) {
+        errno = EINVAL;
+        return -1;
+    }
+    (void)pthread_mutex_lock(&buffer->lock);
+    for (node = buffer->head; node != NULL; node = node->next) {
+        if (node->sequence == sequence) {
+            read_flag = reader == SBUFFER_READER_DATA ? &node->read_by_data :
+                                                       &node->read_by_storage;
+            if (*read_flag) {
+                (void)pthread_mutex_unlock(&buffer->lock);
+                errno = EALREADY;
+                return -1;
+            }
+            *read_flag = true;
+            if (reader == SBUFFER_READER_DATA) {
+                node->pending_data = false;
+            } else {
+                node->pending_storage = false;
+            }
+            while (buffer->head != NULL && buffer->head->read_by_data &&
+                   buffer->head->read_by_storage) {
+                sbuffer_node_t *consumed = buffer->head;
+                buffer->head = consumed->next;
+                if (buffer->head == NULL) {
+                    buffer->tail = NULL;
+                }
+                --buffer->size;
+                free(consumed);
+            }
+            (void)pthread_cond_broadcast(&buffer->not_empty);
+            (void)pthread_mutex_unlock(&buffer->lock);
+            return 0;
+        }
+    }
+    (void)pthread_mutex_unlock(&buffer->lock);
+    errno = ENOENT;
+    return -1;
 }
 
 void sbuffer_shutdown(sbuffer_t *buffer)

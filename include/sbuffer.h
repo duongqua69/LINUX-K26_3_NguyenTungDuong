@@ -4,6 +4,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "sensor_types.h"
 
@@ -16,6 +17,9 @@ typedef struct sbuffer_node {
     sensor_data_t data;
     bool read_by_data;
     bool read_by_storage;
+    bool pending_data;
+    bool pending_storage;
+    uint64_t sequence;
     struct sbuffer_node *next;
 } sbuffer_node_t;
 
@@ -23,6 +27,7 @@ typedef struct {
     sbuffer_node_t *head;
     sbuffer_node_t *tail;
     size_t size;
+    uint64_t next_sequence;
     bool shutdown;
     pthread_mutex_t lock;
     pthread_cond_t not_empty;
@@ -32,7 +37,9 @@ int sbuffer_init(sbuffer_t *buffer);
 int sbuffer_insert(sbuffer_t *buffer, const sensor_data_t *data);
 /* Blocks until this reader has an unread item, or shutdown and queue drained. */
 int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
-                 sensor_data_t *data);
+                 sensor_data_t *data, uint64_t *sequence);
+/* Mark a copied item consumed only after its manager has finished processing it. */
+int sbuffer_ack(sbuffer_t *buffer, sbuffer_reader_t reader, uint64_t sequence);
 void sbuffer_shutdown(sbuffer_t *buffer);
 void sbuffer_destroy(sbuffer_t *buffer);
 
