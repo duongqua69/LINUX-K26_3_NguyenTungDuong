@@ -49,10 +49,18 @@ extern const char *sqlite3_errmsg(sqlite3 *);
 static int gateway_is_stopping(gateway_t *gateway)
 {
     int stopping;
+    int result = pthread_mutex_lock(&gateway->stop_lock);
 
-    (void)pthread_mutex_lock(&gateway->stop_lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
     stopping = gateway->workers_stop;
-    (void)pthread_mutex_unlock(&gateway->stop_lock);
+    result = pthread_mutex_unlock(&gateway->stop_lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
     return stopping;
 }
 
@@ -78,7 +86,12 @@ static int open_database(gateway_t *gateway, sqlite3 **database)
         }
         return -1;
     }
-    (void)sqlite3_busy_timeout(*database, 1000);
+    result = sqlite3_busy_timeout(*database, 1000);
+    if (result != SQLITE_OK) {
+        (void)sqlite3_close(*database);
+        *database = NULL;
+        return -1;
+    }
     result = sqlite3_prepare_v2(*database,
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='SensorData'",
         -1, &statement, NULL);
@@ -149,9 +162,14 @@ static int insert_measurement(sqlite3 *database, const sensor_data_t *data)
 
 static void fail_gateway(gateway_t *gateway)
 {
-    (void)pthread_mutex_lock(&gateway->stop_lock);
-    gateway->storage_failed = 1;
-    (void)pthread_mutex_unlock(&gateway->stop_lock);
+    int result = pthread_mutex_lock(&gateway->stop_lock);
+    if (result == 0) {
+        gateway->storage_failed = 1;
+        result = pthread_mutex_unlock(&gateway->stop_lock);
+    }
+    if (result != 0) {
+        fprintf(stderr, "Storage manager mutex failure: %s\n", strerror(result));
+    }
     /* SIGTERM wakes the main thread from sigsuspend and uses normal cleanup. */
     (void)kill(getpid(), SIGTERM);
 }
@@ -162,6 +180,11 @@ void *storage_manager_thread(void *argument)
     sqlite3 *database = NULL;
     sensor_data_t data;
     uint64_t sequence;
+
+    if (gateway == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
 
     log_storage(gateway, "Storage manager thread started");
     if (connect_with_retries(gateway, &database) != 0) {

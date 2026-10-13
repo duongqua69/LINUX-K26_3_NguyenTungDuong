@@ -14,7 +14,7 @@ SENSOR_INTERVAL_MS ?= 500
 DEPENDENCIES := $(OBJECTS:.o=.d) src/sensor_node.d test/test_protocol_adapters.d \
 	test/test_datamgr.d
 
-.PHONY: all debug test run demo clean
+.PHONY: all debug test run demo valgrind helgrind run-valgrind run-helgrind clean
 
 all: $(TARGET) $(SENSOR_NODE)
 
@@ -37,6 +37,14 @@ test: test/test_protocol_adapters test/test_datamgr
 # Run the gateway and six representative sensor nodes; Ctrl+C stops the demo.
 run demo: all
 	BASE_PORT="$(BASE_PORT)" HTTP_PORT="$(HTTP_PORT)" \
+	SENSOR_INTERVAL_MS="$(SENSOR_INTERVAL_MS)" ./scripts/run_demo.sh
+
+valgrind run-valgrind: all
+	ANALYZER=memcheck BASE_PORT="$(BASE_PORT)" HTTP_PORT="$(HTTP_PORT)" \
+	SENSOR_INTERVAL_MS="$(SENSOR_INTERVAL_MS)" ./scripts/run_demo.sh
+
+helgrind run-helgrind: all
+	ANALYZER=helgrind BASE_PORT="$(BASE_PORT)" HTTP_PORT="$(HTTP_PORT)" \
 	SENSOR_INTERVAL_MS="$(SENSOR_INTERVAL_MS)" ./scripts/run_demo.sh
 
 test/test_protocol_adapters: test/test_protocol_adapters.c src/protocol_adapters.c

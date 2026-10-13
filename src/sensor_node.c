@@ -37,7 +37,16 @@ static int parse_unsigned(const char *text, unsigned long maximum,
 {
     char *end = NULL;
     unsigned long parsed;
+    const unsigned char *cursor;
 
+    if (text == NULL || value == NULL || text[0] == '\0') {
+        return -1;
+    }
+    for (cursor = (const unsigned char *)text; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return -1;
+        }
+    }
     errno = 0;
     parsed = strtoul(text, &end, 10);
     if (errno != 0 || end == text || *end != '\0' || parsed == 0 ||
@@ -186,13 +195,21 @@ static int await_sgp_reply(int fd)
 {
     struct pollfd descriptor = { .fd = fd, .events = POLLIN };
     uint8_t reply;
-    int ready = poll(&descriptor, 1, 1000);
+    int ready;
+    ssize_t received;
+
+    do {
+        ready = poll(&descriptor, 1, 1000);
+    } while (ready < 0 && errno == EINTR);
 
     if (ready <= 0 || (descriptor.revents & POLLIN) == 0) {
         errno = ready == 0 ? ETIMEDOUT : errno;
         return -1;
     }
-    if (recv(fd, &reply, 1, 0) != 1) {
+    do {
+        received = recv(fd, &reply, 1, 0);
+    } while (received < 0 && errno == EINTR);
+    if (received != 1) {
         return -1;
     }
     return reply == ACK ? 1 : (reply == NAK ? 0 : -1);
@@ -291,7 +308,11 @@ int main(int argc, char *argv[])
         }
     }
     if (has_override &&
-        ((type == NODE_DOOR && override_value != 0.0 && override_value != 1.0) ||
+        ((type == NODE_TEMPERATURE && override_value < -273.15) ||
+         (type == NODE_HUMIDITY &&
+          (override_value < 0.0 || override_value > 100.0)) ||
+         ((type == NODE_MOTION || type == NODE_DOOR) &&
+          override_value != 0.0 && override_value != 1.0) ||
          (type == NODE_SMOKE_GAS &&
           (override_value < 0.0 || override_value > UINT16_MAX ||
            override_value != (double)(uint16_t)override_value)))) {

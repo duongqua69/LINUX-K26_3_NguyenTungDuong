@@ -7,6 +7,7 @@
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -18,6 +19,7 @@
 #define ADAPTER_COUNT 4
 #define RX_BUF_SIZE 512
 #define MAX_CONSECUTIVE_PARSE_ERRORS 3
+#define MAX_CONNECTIONS 64U
 
 #ifdef DEBUG
 #define DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
@@ -41,11 +43,35 @@ typedef struct {
 static int stop_requested(gateway_t *gateway)
 {
     int stopped;
+    int result = pthread_mutex_lock(&gateway->stop_lock);
 
-    (void)pthread_mutex_lock(&gateway->stop_lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
     stopped = gateway->workers_stop;
-    (void)pthread_mutex_unlock(&gateway->stop_lock);
+    result = pthread_mutex_unlock(&gateway->stop_lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
     return stopped;
+}
+
+static void report_manager_failure(gateway_t *gateway)
+{
+    int result = pthread_mutex_lock(&gateway->stop_lock);
+    if (result == 0) {
+        gateway->connection_failed = 1;
+        gateway->workers_stop = 1;
+        result = pthread_mutex_unlock(&gateway->stop_lock);
+    }
+    if (result != 0) {
+        fprintf(stderr, "Connection manager mutex failure: %s\n",
+                strerror(result));
+    }
+    /* SIGTERM wakes main, which has it blocked except while waiting in sigsuspend. */
+    (void)kill(getpid(), SIGTERM);
 }
 
 static int send_all(int fd, const uint8_t *buffer, size_t length)
@@ -113,7 +139,12 @@ static int create_listener(uint16_t port)
     if (fd < 0) {
         return -1;
     }
-    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled));
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) != 0) {
+        int saved_errno = errno;
+        (void)close(fd);
+        errno = saved_errno;
+        return -1;
+    }
     address.sin_family = AF_INET;
     address.sin_addr.s_addr = htonl(INADDR_ANY);
     address.sin_port = htons(port);
@@ -226,6 +257,7 @@ static int process_buffer(gateway_t *gateway, connection_t *connection)
             DEBUG_PRINT("Ignoring duplicate SGP frame: sensor_id=%u ts=%lld\n",
                         (unsigned int)data.id, (long long)data.ts);
         } else if (sbuffer_insert(&gateway->sbuffer, &data) != 0) {
+            log_listener_failure(gateway, connection->adapter, strerror(errno));
             return -1;
         }
         if (connection->adapter->port_offset == 3) {
@@ -251,6 +283,12 @@ void *connection_manager_thread(void *argument)
     connection_t *connections = NULL;
     size_t count = 0;
     size_t i;
+    int fatal_error = 0;
+
+    if (gateway == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
 
     if (logger_write(gateway, "CONN", "Connection manager thread started") != 0) {
         perror("logger_write");
@@ -264,18 +302,29 @@ void *connection_manager_thread(void *argument)
             while (i > 0) {
                 (void)close(listeners[--i]);
             }
+            report_manager_failure(gateway);
             return NULL;
         }
     }
 
-    while (!stop_requested(gateway)) {
+    for (;;) {
+        int stopping = stop_requested(gateway);
         size_t polled_count = count;
         struct pollfd *pollfds = calloc(ADAPTER_COUNT + polled_count,
                                        sizeof(*pollfds));
         int ready;
 
+        if (stopping != 0) {
+            if (stopping < 0) {
+                fatal_error = 1;
+            }
+            free(pollfds);
+            break;
+        }
+
         if (pollfds == NULL) {
             log_listener_failure(gateway, &protocol_adapters[0], "out of memory");
+            fatal_error = 1;
             break;
         }
         for (i = 0; i < ADAPTER_COUNT; ++i) {
@@ -290,6 +339,20 @@ void *connection_manager_thread(void *argument)
         if (ready < 0 && errno != EINTR) {
             log_listener_failure(gateway, &protocol_adapters[0], strerror(errno));
             free(pollfds);
+            fatal_error = 1;
+            break;
+        }
+
+        for (i = 0; i < ADAPTER_COUNT; ++i) {
+            if ((pollfds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                log_listener_failure(gateway, &protocol_adapters[i],
+                                     "listener poll failure");
+                fatal_error = 1;
+                break;
+            }
+        }
+        if (fatal_error) {
+            free(pollfds);
             break;
         }
 
@@ -297,18 +360,28 @@ void *connection_manager_thread(void *argument)
             if ((pollfds[i].revents & POLLIN) != 0) {
                 int client = accept(listeners[i], NULL, NULL);
                 if (client >= 0) {
-                    if (append_connection(&connections, &count, client,
+                    if (count >= MAX_CONNECTIONS) {
+                        log_listener_failure(gateway, &protocol_adapters[i],
+                                             "maximum connection count reached");
+                        (void)close(client);
+                    } else if (append_connection(&connections, &count, client,
                                           &protocol_adapters[i]) != 0) {
                         log_listener_failure(gateway, &protocol_adapters[i],
                                              "out of memory");
                         (void)close(client);
                     }
                 } else if (errno != EINTR && errno != EAGAIN &&
-                           errno != EWOULDBLOCK) {
+                           errno != EWOULDBLOCK && errno != ECONNABORTED) {
                     log_listener_failure(gateway, &protocol_adapters[i],
                                          strerror(errno));
+                    fatal_error = 1;
                 }
             }
+        }
+
+        if (fatal_error) {
+            free(pollfds);
+            break;
         }
 
         for (i = polled_count; i > 0; --i) {
@@ -328,7 +401,13 @@ void *connection_manager_thread(void *argument)
                                     connection->rx + connection->rx_len,
                                     sizeof(connection->rx) - connection->rx_len,
                                     0);
-                    if (received <= 0) {
+                    if (received == 0) {
+                        remove = 1;
+                    } else if (received < 0) {
+                        if (errno == EINTR || errno == EAGAIN ||
+                            errno == EWOULDBLOCK) {
+                            continue;
+                        }
                         remove = 1;
                     } else {
                         connection->rx_len += (size_t)received;
@@ -360,6 +439,9 @@ void *connection_manager_thread(void *argument)
         close_connection(gateway, &connections[--count]);
     }
     free(connections);
+    if (fatal_error) {
+        report_manager_failure(gateway);
+    }
     return NULL;
 }
 
@@ -369,6 +451,10 @@ void *data_manager_thread(void *argument)
     sensor_data_t data;
     uint64_t sequence;
 
+    if (gateway == NULL) {
+        errno = EINVAL;
+        return NULL;
+    }
     if (logger_write(gateway, "DATA", "Data manager thread started") != 0) {
         perror("logger_write");
     }

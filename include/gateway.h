@@ -18,6 +18,7 @@ typedef struct {
     pthread_mutex_t stop_lock;
     int workers_stop; /* Protected by stop_lock. */
     int storage_failed; /* Protected by stop_lock. */
+    int connection_failed; /* Protected by stop_lock. */
     int log_fd;
     pthread_mutex_t log_lock;
     pid_t log_pid;

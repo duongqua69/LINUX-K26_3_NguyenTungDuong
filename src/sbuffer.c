@@ -5,6 +5,26 @@
 #include <errno.h>
 #include <stdlib.h>
 
+static int mutex_lock(pthread_mutex_t *lock)
+{
+    int result = pthread_mutex_lock(lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    return 0;
+}
+
+static int mutex_unlock(pthread_mutex_t *lock)
+{
+    int result = pthread_mutex_unlock(lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    return 0;
+}
+
 int sbuffer_init(sbuffer_t *buffer)
 {
     int result;
@@ -41,11 +61,26 @@ int sbuffer_insert(sbuffer_t *buffer, const sensor_data_t *data)
         return -1;
     }
     node->data = *data;
-    (void)pthread_mutex_lock(&buffer->lock);
+    if (mutex_lock(&buffer->lock) != 0) {
+        free(node);
+        return -1;
+    }
     if (buffer->shutdown) {
-        (void)pthread_mutex_unlock(&buffer->lock);
+        (void)mutex_unlock(&buffer->lock);
         free(node);
         errno = ESHUTDOWN;
+        return -1;
+    }
+    if (buffer->size >= SBUFFER_MAX_ITEMS) {
+        (void)mutex_unlock(&buffer->lock);
+        free(node);
+        errno = ENOBUFS;
+        return -1;
+    }
+    if (buffer->next_sequence == UINT64_MAX) {
+        (void)mutex_unlock(&buffer->lock);
+        free(node);
+        errno = EOVERFLOW;
         return -1;
     }
     node->sequence = ++buffer->next_sequence;
@@ -56,8 +91,17 @@ int sbuffer_insert(sbuffer_t *buffer, const sensor_data_t *data)
     }
     buffer->tail = node;
     ++buffer->size;
-    (void)pthread_cond_broadcast(&buffer->not_empty);
-    (void)pthread_mutex_unlock(&buffer->lock);
+    {
+        int result = pthread_cond_broadcast(&buffer->not_empty);
+        int unlock_result = mutex_unlock(&buffer->lock);
+        if (result != 0) {
+            errno = result;
+            return -1;
+        }
+        if (unlock_result != 0) {
+            return -1;
+        }
+    }
     return 0;
 }
 
@@ -72,7 +116,9 @@ int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
         errno = EINVAL;
         return -1;
     }
-    (void)pthread_mutex_lock(&buffer->lock);
+    if (mutex_lock(&buffer->lock) != 0) {
+        return -1;
+    }
     for (;;) {
         for (node = buffer->head; node != NULL; node = node->next) {
             read_flag = reader == SBUFFER_READER_DATA ? &node->read_by_data :
@@ -83,15 +129,22 @@ int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
                 *data = node->data;
                 *sequence = node->sequence;
                 *pending_flag = true;
-                (void)pthread_mutex_unlock(&buffer->lock);
+                (void)mutex_unlock(&buffer->lock);
                 return 1;
             }
         }
         if (buffer->shutdown) {
-            (void)pthread_mutex_unlock(&buffer->lock);
+            (void)mutex_unlock(&buffer->lock);
             return 0;
         }
-        (void)pthread_cond_wait(&buffer->not_empty, &buffer->lock);
+        {
+            int result = pthread_cond_wait(&buffer->not_empty, &buffer->lock);
+            if (result != 0) {
+                (void)mutex_unlock(&buffer->lock);
+                errno = result;
+                return -1;
+            }
+        }
     }
 }
 
@@ -105,14 +158,23 @@ int sbuffer_ack(sbuffer_t *buffer, sbuffer_reader_t reader, uint64_t sequence)
         errno = EINVAL;
         return -1;
     }
-    (void)pthread_mutex_lock(&buffer->lock);
+    if (mutex_lock(&buffer->lock) != 0) {
+        return -1;
+    }
     for (node = buffer->head; node != NULL; node = node->next) {
         if (node->sequence == sequence) {
             read_flag = reader == SBUFFER_READER_DATA ? &node->read_by_data :
                                                        &node->read_by_storage;
+            bool *pending_flag = reader == SBUFFER_READER_DATA ?
+                                     &node->pending_data : &node->pending_storage;
             if (*read_flag) {
-                (void)pthread_mutex_unlock(&buffer->lock);
+                (void)mutex_unlock(&buffer->lock);
                 errno = EALREADY;
+                return -1;
+            }
+            if (!*pending_flag) {
+                (void)mutex_unlock(&buffer->lock);
+                errno = EPERM;
                 return -1;
             }
             *read_flag = true;
@@ -131,33 +193,83 @@ int sbuffer_ack(sbuffer_t *buffer, sbuffer_reader_t reader, uint64_t sequence)
                 --buffer->size;
                 free(consumed);
             }
-            (void)pthread_cond_broadcast(&buffer->not_empty);
-            (void)pthread_mutex_unlock(&buffer->lock);
+            {
+                int result = pthread_cond_broadcast(&buffer->not_empty);
+                int unlock_result = mutex_unlock(&buffer->lock);
+                if (result != 0) {
+                    errno = result;
+                    return -1;
+                }
+                if (unlock_result != 0) {
+                    return -1;
+                }
+            }
             return 0;
         }
     }
-    (void)pthread_mutex_unlock(&buffer->lock);
+    (void)mutex_unlock(&buffer->lock);
     errno = ENOENT;
     return -1;
 }
 
-void sbuffer_shutdown(sbuffer_t *buffer)
+int sbuffer_shutdown(sbuffer_t *buffer)
 {
-    (void)pthread_mutex_lock(&buffer->lock);
+    int result;
+    int unlock_result;
+
+    if (buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (mutex_lock(&buffer->lock) != 0) {
+        return -1;
+    }
     buffer->shutdown = true;
-    (void)pthread_cond_broadcast(&buffer->not_empty);
-    (void)pthread_mutex_unlock(&buffer->lock);
+    result = pthread_cond_broadcast(&buffer->not_empty);
+    unlock_result = mutex_unlock(&buffer->lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    return unlock_result;
 }
 
-void sbuffer_destroy(sbuffer_t *buffer)
+int sbuffer_destroy(sbuffer_t *buffer)
 {
-    sbuffer_node_t *node = buffer->head;
+    sbuffer_node_t *node;
+    int result;
 
+    if (buffer == NULL) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (mutex_lock(&buffer->lock) != 0) {
+        return -1;
+    }
+    buffer->shutdown = true;
+    result = pthread_cond_broadcast(&buffer->not_empty);
+    if (mutex_unlock(&buffer->lock) != 0) {
+        return -1;
+    }
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    result = pthread_cond_destroy(&buffer->not_empty);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    result = pthread_mutex_destroy(&buffer->lock);
+    if (result != 0) {
+        errno = result;
+        return -1;
+    }
+    node = buffer->head;
     while (node != NULL) {
         sbuffer_node_t *next = node->next;
         free(node);
         node = next;
     }
-    (void)pthread_cond_destroy(&buffer->not_empty);
-    (void)pthread_mutex_destroy(&buffer->lock);
+    return 0;
 }

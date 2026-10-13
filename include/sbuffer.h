@@ -8,6 +8,9 @@
 
 #include "sensor_types.h"
 
+/* Bound memory use when storage is slower than incoming sensor traffic. */
+#define SBUFFER_MAX_ITEMS 1024U
+
 typedef enum {
     SBUFFER_READER_DATA,
     SBUFFER_READER_STORAGE
@@ -40,7 +43,8 @@ int sbuffer_read(sbuffer_t *buffer, sbuffer_reader_t reader,
                  sensor_data_t *data, uint64_t *sequence);
 /* Mark a copied item consumed only after its manager has finished processing it. */
 int sbuffer_ack(sbuffer_t *buffer, sbuffer_reader_t reader, uint64_t sequence);
-void sbuffer_shutdown(sbuffer_t *buffer);
-void sbuffer_destroy(sbuffer_t *buffer);
+int sbuffer_shutdown(sbuffer_t *buffer);
+/* Call only after all threads using the buffer have exited. */
+int sbuffer_destroy(sbuffer_t *buffer);
 
 #endif

@@ -36,9 +36,15 @@ static int parse_port(const char *text, uint16_t *port)
 {
     char *end = NULL;
     unsigned long value;
+    const unsigned char *cursor;
 
     if (text == NULL || text[0] == '\0' || port == NULL) {
         return -1;
+    }
+    for (cursor = (const unsigned char *)text; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return -1;
+        }
     }
 
     errno = 0;
@@ -61,13 +67,24 @@ static void handle_termination_signal(int signal_number)
 
 static void wake_manager_threads(int request_stop)
 {
+    int result;
+
     /* workers_stop is accessed only while stop_lock is held. */
-    (void)pthread_mutex_lock(&gateway.stop_lock);
+    result = pthread_mutex_lock(&gateway.stop_lock);
+    if (result != 0) {
+        fprintf(stderr, "Could not lock stop mutex: %s\n", strerror(result));
+        gateway.stop = 1;
+        return;
+    }
     if (request_stop != 0) {
         gateway.stop = 1;
     }
     gateway.workers_stop = 1;
-    (void)pthread_mutex_unlock(&gateway.stop_lock);
+    result = pthread_mutex_unlock(&gateway.stop_lock);
+    if (result != 0) {
+        fprintf(stderr, "Could not unlock stop mutex: %s\n", strerror(result));
+        gateway.stop = 1;
+    }
 }
 
 int main(int argc, char *argv[])
@@ -90,6 +107,7 @@ int main(int argc, char *argv[])
     size_t threads_created = 0;
     size_t i;
     int storage_failed;
+    int connection_failed;
     int exit_status = EXIT_SUCCESS;
 
     /* Step 3 accepts a base port alone; preserve the earlier optional HTTP port. */
@@ -110,6 +128,11 @@ int main(int argc, char *argv[])
     }
     if (argc == 2) {
         gateway.http_port = 8080;
+    }
+    if (gateway.http_port >= gateway.base_port &&
+        gateway.http_port <= gateway.base_port + 3) {
+        fprintf(stderr, "HTTP port must not overlap the sensor ports.\n");
+        return EXIT_FAILURE;
     }
     if (argc == 4) {
         room_sensor_path = argv[3];
@@ -200,7 +223,10 @@ int main(int argc, char *argv[])
         }
         wake_manager_threads(0);
     }
-    sbuffer_shutdown(&gateway.sbuffer);
+    if (sbuffer_shutdown(&gateway.sbuffer) != 0) {
+        perror("sbuffer_shutdown");
+        exit_status = EXIT_FAILURE;
+    }
 
     /* Join workers before writing the final event and closing the FIFO. */
     for (i = 0; i < threads_created; ++i) {
@@ -212,15 +238,30 @@ int main(int argc, char *argv[])
         }
     }
 
-    (void)pthread_mutex_lock(&gateway.stop_lock);
-    storage_failed = gateway.storage_failed;
-    (void)pthread_mutex_unlock(&gateway.stop_lock);
+    {
+        int result = pthread_mutex_lock(&gateway.stop_lock);
+        if (result != 0) {
+            fprintf(stderr, "Could not lock stop mutex: %s\n", strerror(result));
+            exit_status = EXIT_FAILURE;
+            storage_failed = 0;
+            connection_failed = 1;
+        } else {
+            storage_failed = gateway.storage_failed;
+            connection_failed = gateway.connection_failed;
+            result = pthread_mutex_unlock(&gateway.stop_lock);
+            if (result != 0) {
+                fprintf(stderr, "Could not unlock stop mutex: %s\n", strerror(result));
+                exit_status = EXIT_FAILURE;
+            }
+        }
+    }
     (void)snprintf(log_message, sizeof(log_message),
                    "Gateway shutting down (%s)",
                    threads_created != MANAGER_COUNT ? "thread creation failure" :
                    storage_failed ? "database retry limit reached" :
+                   connection_failed ? "connection manager failure" :
                                     "signal received");
-    if (storage_failed) {
+    if (storage_failed || connection_failed) {
         exit_status = EXIT_FAILURE;
     }
     if (logger_write(&gateway, "MAIN", log_message) != 0) {
@@ -237,6 +278,9 @@ int main(int argc, char *argv[])
     if (threads_created != MANAGER_COUNT) {
         exit_status = EXIT_FAILURE;
     }
-    sbuffer_destroy(&gateway.sbuffer);
+    if (sbuffer_destroy(&gateway.sbuffer) != 0) {
+        perror("sbuffer_destroy");
+        exit_status = EXIT_FAILURE;
+    }
     return exit_status;
 }

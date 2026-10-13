@@ -78,7 +78,7 @@ int datamgr_load(datamgr_t *manager, const char *path)
     if (file == NULL) {
         return -1;
     }
-    while ((line_length = getline(&line, &capacity, file)) >= 0) {
+    for (;;) {
         char *save = NULL;
         char *room_text;
         char *id_text;
@@ -89,7 +89,14 @@ int datamgr_load(datamgr_t *manager, const char *path)
         sensor_type_t type;
         size_t i;
 
-        (void)line_length;
+        errno = 0;
+        line_length = getline(&line, &capacity, file);
+        if (line_length < 0) {
+            if (ferror(file) || errno == ENOMEM) {
+                status = -1;
+            }
+            break;
+        }
         room_text = strtok_r(line, " \t\r\n", &save);
         if (room_text == NULL || room_text[0] == '#') {
             continue;
@@ -127,11 +134,10 @@ int datamgr_load(datamgr_t *manager, const char *path)
                 STATE_COLLECTING : STATE_NORMAL;
         ++manager->n;
     }
-    if (ferror(file)) {
+    free(line);
+    if (fclose(file) != 0) {
         status = -1;
     }
-    free(line);
-    (void)fclose(file);
     if (status == 0 && manager->n == 0) {
         errno = EINVAL;
         status = -1;
@@ -311,14 +317,33 @@ int datamgr_process(datamgr_t *manager, const sensor_data_t *data,
         return -1;
     }
     memset(event, 0, sizeof(*event));
+    if (data->id == 0 || data->type < SENSOR_TEMPERATURE ||
+        data->type > SENSOR_SMOKE_GAS || !isfinite(data->value) ||
+        data->ts < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (manager->n > MAX_SENSORS) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Enforce physical domains that are unambiguous across sensor models. */
+    if ((data->type == SENSOR_TEMPERATURE && data->value < -273.15) ||
+        (data->type == SENSOR_HUMIDITY &&
+         (data->value < 0.0 || data->value > 100.0)) ||
+        ((data->type == SENSOR_MOTION || data->type == SENSOR_DOOR) &&
+         data->value != 0.0 && data->value != 1.0) ||
+        (data->type == SENSOR_SMOKE_GAS && data->value < 0.0)) {
+        errno = ERANGE;
+        return -1;
+    }
     for (i = 0; i < manager->n; ++i) {
         if (manager->sensors[i].info.id == data->id) {
             sensor = &manager->sensors[i];
             break;
         }
     }
-    if (sensor == NULL || sensor->info.type != data->type ||
-        data->type < SENSOR_TEMPERATURE || data->type > SENSOR_SMOKE_GAS) {
+    if (sensor == NULL || sensor->info.type != data->type) {
         (void)snprintf(event->message, sizeof(event->message),
                        "Received sensor data with invalid sensor node ID %u",
                        (unsigned int)data->id);
