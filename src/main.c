@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include "gateway.h"
+#include "connmgr.h"
 #include "logger.h"
 
 #ifdef DEBUG
@@ -21,15 +22,8 @@
 #define MANAGER_COUNT 3
 #define LOG_MESSAGE_BUFFER_SIZE 200
 
-typedef struct {
-    gateway_t *gateway;
-    const char *name;
-    const char *log_source;
-} manager_thread_arg_t;
-
 static gateway_t gateway = {
     .stop_lock = PTHREAD_MUTEX_INITIALIZER,
-    .stop_cond = PTHREAD_COND_INITIALIZER,
     .log_fd = -1,
     .log_lock = PTHREAD_MUTEX_INITIALIZER,
     .log_pid = -1
@@ -63,31 +57,6 @@ static void handle_termination_signal(int signal_number)
     gateway.stop = 1;
 }
 
-static void *manager_thread(void *argument)
-{
-    const manager_thread_arg_t *thread_arg = argument;
-    char message[128];
-
-    (void)snprintf(message, sizeof(message), "%s thread started",
-                   thread_arg->name);
-    if (logger_write(thread_arg->gateway, thread_arg->log_source,
-                     message) != 0) {
-        perror("logger_write");
-    }
-    DEBUG_PRINT("%s thread started\n", thread_arg->name);
-
-    /* Wait without polling; main broadcasts after it observes a stop request. */
-    (void)pthread_mutex_lock(&thread_arg->gateway->stop_lock);
-    while (thread_arg->gateway->workers_stop == 0) {
-        (void)pthread_cond_wait(&thread_arg->gateway->stop_cond,
-                                &thread_arg->gateway->stop_lock);
-    }
-    (void)pthread_mutex_unlock(&thread_arg->gateway->stop_lock);
-
-    DEBUG_PRINT("%s thread stopped\n", thread_arg->name);
-    return NULL;
-}
-
 static void wake_manager_threads(int request_stop)
 {
     /* workers_stop is accessed only while stop_lock is held. */
@@ -96,17 +65,14 @@ static void wake_manager_threads(int request_stop)
         gateway.stop = 1;
     }
     gateway.workers_stop = 1;
-    (void)pthread_cond_broadcast(&gateway.stop_cond);
     (void)pthread_mutex_unlock(&gateway.stop_lock);
 }
 
 int main(int argc, char *argv[])
 {
     pthread_t threads[MANAGER_COUNT];
-    manager_thread_arg_t thread_args[MANAGER_COUNT] = {
-        { &gateway, "Connection manager", "CONN" },
-        { &gateway, "Data manager", "DATA" },
-        { &gateway, "Storage manager", "STOR" }
+    void *(*thread_functions[MANAGER_COUNT])(void *) = {
+        connection_manager_thread, data_manager_thread, storage_manager_thread
     };
     const char *thread_names[MANAGER_COUNT] = {
         "Connection manager",
@@ -121,16 +87,24 @@ int main(int argc, char *argv[])
     size_t i;
     int exit_status = EXIT_SUCCESS;
 
-    /* The four protocol ports are base_port through base_port + 3. */
-    if (argc != 3 || parse_port(argv[1], &gateway.base_port) != 0 ||
-        parse_port(argv[2], &gateway.http_port) != 0 ||
+    /* Step 3 accepts a base port alone; preserve the earlier optional HTTP port. */
+    if ((argc != 2 && argc != 3) ||
+        parse_port(argv[1], &gateway.base_port) != 0 ||
+        (argc == 3 && parse_port(argv[2], &gateway.http_port) != 0) ||
         gateway.base_port > UINT16_MAX - 3 ||
-        (gateway.http_port >= gateway.base_port &&
+        (argc == 3 && gateway.http_port >= gateway.base_port &&
          gateway.http_port <= gateway.base_port + 3)) {
-        fprintf(stderr, "Usage: %s <base-port> <http-port>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <base-port> [http-port]\n", argv[0]);
         fprintf(stderr,
                 "Ports must be in 1..65535; base-port through base-port+3 "
-                "must be in range and must not include http-port.\n");
+                "must be in range.\n");
+        return EXIT_FAILURE;
+    }
+    if (argc == 2) {
+        gateway.http_port = 8080;
+    }
+    if (sbuffer_init(&gateway.sbuffer) != 0) {
+        perror("sbuffer_init");
         return EXIT_FAILURE;
     }
 
@@ -140,6 +114,7 @@ int main(int argc, char *argv[])
     sigaddset(&termination_signals, SIGTERM);
     if (sigprocmask(SIG_BLOCK, &termination_signals, &previous_mask) != 0) {
         perror("sigprocmask");
+        sbuffer_destroy(&gateway.sbuffer);
         return EXIT_FAILURE;
     }
 
@@ -150,6 +125,7 @@ int main(int argc, char *argv[])
         sigaction(SIGTERM, &action, NULL) != 0) {
         perror("sigaction");
         (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+        sbuffer_destroy(&gateway.sbuffer);
         return EXIT_FAILURE;
     }
 
@@ -157,6 +133,7 @@ int main(int argc, char *argv[])
     if (logger_start(&gateway) != 0) {
         perror("logger_start");
         (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+        sbuffer_destroy(&gateway.sbuffer);
         return EXIT_FAILURE;
     }
 
@@ -168,6 +145,7 @@ int main(int argc, char *argv[])
         perror("logger_write");
         (void)logger_stop(&gateway);
         (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+        sbuffer_destroy(&gateway.sbuffer);
         return EXIT_FAILURE;
     }
 
@@ -176,10 +154,10 @@ int main(int argc, char *argv[])
                 (unsigned int)gateway.base_port,
                 (unsigned int)gateway.http_port);
 
-    /* Start the three empty manager threads required for this project step. */
+    /* Start the connection manager and the two independent sbuffer readers. */
     for (i = 0; i < MANAGER_COUNT; ++i) {
-        int result = pthread_create(&threads[i], NULL, manager_thread,
-                                   &thread_args[i]);
+        int result = pthread_create(&threads[i], NULL, thread_functions[i],
+                                   &gateway);
         if (result != 0) {
             fprintf(stderr, "Could not start %s thread: %s\n",
                     thread_names[i], strerror(result));
@@ -196,6 +174,7 @@ int main(int argc, char *argv[])
         }
         wake_manager_threads(0);
     }
+    sbuffer_shutdown(&gateway.sbuffer);
 
     /* Join workers before writing the final event and closing the FIFO. */
     for (i = 0; i < threads_created; ++i) {
@@ -225,5 +204,6 @@ int main(int argc, char *argv[])
     if (threads_created != MANAGER_COUNT) {
         exit_status = EXIT_FAILURE;
     }
+    sbuffer_destroy(&gateway.sbuffer);
     return exit_status;
 }

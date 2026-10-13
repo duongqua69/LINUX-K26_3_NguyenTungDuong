@@ -17,13 +17,36 @@ following the embedded Linux assignment.
 make
 ```
 
-This creates `./server` using GCC with `-Wall -Wextra -pthread`.
+This creates `./server` and the temperature sensor simulator `./sensor_node`
+using GCC with `-Wall -Wextra -pthread`.
 
 Build with debug diagnostics enabled:
 
 ```sh
 make debug
 ```
+
+## Step 3: temperature sensor data path
+
+Run the gateway with a TCP base port (HTTP port remains optional for the earlier
+startup interface):
+
+```sh
+./server 1234
+```
+
+In other terminals, start one or more simulated temperature sensors:
+
+```sh
+./sensor_node temperature 10 127.0.0.1 1234 500
+```
+
+In a debug build, both Data manager and Storage manager print each received
+measurement once. Stop the gateway with Ctrl+C; it wakes both blocked sbuffer
+readers and closes active sensor connections. Connection manager uses `poll()`
+to serve all sensor sockets in one thread, avoiding one thread per client while
+still allowing concurrent connections. The shared sbuffer uses a mutex and
+condition variable; each item is freed after both readers have consumed it.
 
 Remove generated objects and the executable:
 
