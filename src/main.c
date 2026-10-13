@@ -18,14 +18,16 @@
 #endif
 
 #define MANAGER_COUNT 3
-#define THREAD_POLL_NANOSECONDS 100000000L
 
 typedef struct {
     gateway_t *gateway;
     const char *name;
 } manager_thread_arg_t;
 
-static gateway_t gateway;
+static gateway_t gateway = {
+    .stop_lock = PTHREAD_MUTEX_INITIALIZER,
+    .stop_cond = PTHREAD_COND_INITIALIZER
+};
 
 static int parse_port(const char *text, uint16_t *port)
 {
@@ -56,17 +58,29 @@ static void handle_termination_signal(int signal_number)
 static void *manager_thread(void *argument)
 {
     const manager_thread_arg_t *thread_arg = argument;
-    const struct timespec poll_delay = {
-        .tv_sec = 0,
-        .tv_nsec = THREAD_POLL_NANOSECONDS
-    };
 
     DEBUG_PRINT("%s thread started\n", thread_arg->name);
-    while (thread_arg->gateway->stop == 0) {
-        (void)nanosleep(&poll_delay, NULL);
+
+    (void)pthread_mutex_lock(&thread_arg->gateway->stop_lock);
+    while (thread_arg->gateway->workers_stop == 0) {
+        (void)pthread_cond_wait(&thread_arg->gateway->stop_cond,
+                                &thread_arg->gateway->stop_lock);
     }
+    (void)pthread_mutex_unlock(&thread_arg->gateway->stop_lock);
+
     DEBUG_PRINT("%s thread stopped\n", thread_arg->name);
     return NULL;
+}
+
+static void wake_manager_threads(int request_stop)
+{
+    (void)pthread_mutex_lock(&gateway.stop_lock);
+    if (request_stop != 0) {
+        gateway.stop = 1;
+    }
+    gateway.workers_stop = 1;
+    (void)pthread_cond_broadcast(&gateway.stop_cond);
+    (void)pthread_mutex_unlock(&gateway.stop_lock);
 }
 
 int main(int argc, char *argv[])
@@ -130,7 +144,7 @@ int main(int argc, char *argv[])
         if (result != 0) {
             fprintf(stderr, "Could not start %s thread: %s\n",
                     thread_names[i], strerror(result));
-            gateway.stop = 1;
+            wake_manager_threads(1);
             break;
         }
         ++threads_created;
@@ -140,6 +154,7 @@ int main(int argc, char *argv[])
         while (gateway.stop == 0) {
             (void)sigsuspend(&previous_mask);
         }
+        wake_manager_threads(0);
     }
 
     (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
