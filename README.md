@@ -186,11 +186,3 @@ Các kiểm tra gần nhất:
 `make clean` xóa object, dependency files, binary và test executable. Log và
 database được giữ lại để có thể xem kết quả lần chạy.
 
-## Báo cáo chi tiết
-
-- [Step 1 Helgrind](step1_helgrind_report.md)
-- [Step 3](step3_report.md)
-- [Step 4](step4_report.md)
-- [Step 5](step5_report.md)
-- [Step 6](step6_report.md)
-- [Step 7](step7_report.md)
