@@ -10,6 +10,7 @@
 #include <time.h>
 
 #include "gateway.h"
+#include "logger.h"
 
 #ifdef DEBUG
 #define DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
@@ -18,17 +19,23 @@
 #endif
 
 #define MANAGER_COUNT 3
+#define LOG_MESSAGE_BUFFER_SIZE 200
 
 typedef struct {
     gateway_t *gateway;
     const char *name;
+    const char *log_source;
 } manager_thread_arg_t;
 
 static gateway_t gateway = {
     .stop_lock = PTHREAD_MUTEX_INITIALIZER,
-    .stop_cond = PTHREAD_COND_INITIALIZER
+    .stop_cond = PTHREAD_COND_INITIALIZER,
+    .log_fd = -1,
+    .log_lock = PTHREAD_MUTEX_INITIALIZER,
+    .log_pid = -1
 };
 
+/* Parse a decimal TCP port and reject empty, trailing, zero, or out-of-range input. */
 static int parse_port(const char *text, uint16_t *port)
 {
     char *end = NULL;
@@ -52,15 +59,24 @@ static int parse_port(const char *text, uint16_t *port)
 static void handle_termination_signal(int signal_number)
 {
     (void)signal_number;
+    /* Defer thread coordination and cleanup to the main thread. */
     gateway.stop = 1;
 }
 
 static void *manager_thread(void *argument)
 {
     const manager_thread_arg_t *thread_arg = argument;
+    char message[128];
 
+    (void)snprintf(message, sizeof(message), "%s thread started",
+                   thread_arg->name);
+    if (logger_write(thread_arg->gateway, thread_arg->log_source,
+                     message) != 0) {
+        perror("logger_write");
+    }
     DEBUG_PRINT("%s thread started\n", thread_arg->name);
 
+    /* Wait without polling; main broadcasts after it observes a stop request. */
     (void)pthread_mutex_lock(&thread_arg->gateway->stop_lock);
     while (thread_arg->gateway->workers_stop == 0) {
         (void)pthread_cond_wait(&thread_arg->gateway->stop_cond,
@@ -74,6 +90,7 @@ static void *manager_thread(void *argument)
 
 static void wake_manager_threads(int request_stop)
 {
+    /* workers_stop is accessed only while stop_lock is held. */
     (void)pthread_mutex_lock(&gateway.stop_lock);
     if (request_stop != 0) {
         gateway.stop = 1;
@@ -87,9 +104,9 @@ int main(int argc, char *argv[])
 {
     pthread_t threads[MANAGER_COUNT];
     manager_thread_arg_t thread_args[MANAGER_COUNT] = {
-        { &gateway, "Connection manager" },
-        { &gateway, "Data manager" },
-        { &gateway, "Storage manager" }
+        { &gateway, "Connection manager", "CONN" },
+        { &gateway, "Data manager", "DATA" },
+        { &gateway, "Storage manager", "STOR" }
     };
     const char *thread_names[MANAGER_COUNT] = {
         "Connection manager",
@@ -99,10 +116,12 @@ int main(int argc, char *argv[])
     struct sigaction action = { 0 };
     sigset_t termination_signals;
     sigset_t previous_mask;
+    char log_message[LOG_MESSAGE_BUFFER_SIZE];
     size_t threads_created = 0;
     size_t i;
     int exit_status = EXIT_SUCCESS;
 
+    /* The four protocol ports are base_port through base_port + 3. */
     if (argc != 3 || parse_port(argv[1], &gateway.base_port) != 0 ||
         parse_port(argv[2], &gateway.http_port) != 0 ||
         gateway.base_port > UINT16_MAX - 3 ||
@@ -115,6 +134,7 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* Block termination signals so only the main thread handles them in sigsuspend. */
     sigemptyset(&termination_signals);
     sigaddset(&termination_signals, SIGINT);
     sigaddset(&termination_signals, SIGTERM);
@@ -133,11 +153,30 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* Start the log process before any thread can emit an event. */
+    if (logger_start(&gateway) != 0) {
+        perror("logger_start");
+        (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+        return EXIT_FAILURE;
+    }
+
+    (void)snprintf(log_message, sizeof(log_message),
+                   "Gateway started (TCP base port %u, HTTP port %u)",
+                   (unsigned int)gateway.base_port,
+                   (unsigned int)gateway.http_port);
+    if (logger_write(&gateway, "MAIN", log_message) != 0) {
+        perror("logger_write");
+        (void)logger_stop(&gateway);
+        (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+        return EXIT_FAILURE;
+    }
+
     printf("Gateway started …\n");
     DEBUG_PRINT("Base port: %u, HTTP port: %u\n",
                 (unsigned int)gateway.base_port,
                 (unsigned int)gateway.http_port);
 
+    /* Start the three empty manager threads required for this project step. */
     for (i = 0; i < MANAGER_COUNT; ++i) {
         int result = pthread_create(&threads[i], NULL, manager_thread,
                                    &thread_args[i]);
@@ -151,13 +190,14 @@ int main(int argc, char *argv[])
     }
 
     if (threads_created == MANAGER_COUNT) {
+        /* sigsuspend atomically waits while temporarily unblocking the signals. */
         while (gateway.stop == 0) {
             (void)sigsuspend(&previous_mask);
         }
         wake_manager_threads(0);
     }
 
-    (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
+    /* Join workers before writing the final event and closing the FIFO. */
     for (i = 0; i < threads_created; ++i) {
         int result = pthread_join(threads[i], NULL);
         if (result != 0) {
@@ -166,6 +206,20 @@ int main(int argc, char *argv[])
             exit_status = EXIT_FAILURE;
         }
     }
+
+    (void)snprintf(log_message, sizeof(log_message),
+                   "Gateway shutting down (%s)",
+                   threads_created == MANAGER_COUNT ? "signal received" :
+                                                      "thread creation failure");
+    if (logger_write(&gateway, "MAIN", log_message) != 0) {
+        perror("logger_write");
+        exit_status = EXIT_FAILURE;
+    }
+    if (logger_stop(&gateway) != 0) {
+        perror("logger_stop");
+        exit_status = EXIT_FAILURE;
+    }
+    (void)sigprocmask(SIG_SETMASK, &previous_mask, NULL);
 
     printf("Gateway shutting down …\n");
     if (threads_created != MANAGER_COUNT) {

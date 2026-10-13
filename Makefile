@@ -4,7 +4,7 @@ CFLAGS := -std=c11 -Wall -Wextra -pthread
 LDFLAGS := -pthread
 
 TARGET := server
-SOURCES := src/main.c
+SOURCES := src/main.c src/logger.c
 OBJECTS := $(SOURCES:.c=.o)
 
 .PHONY: all debug clean
